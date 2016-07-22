@@ -1,11 +1,12 @@
-/* jef format changed to writing but with error stop color without hoop lock and error flags in trim but converts perfect 100% */
-
 #include "format-jef.h"
 #include "emb-file.h"
 #include "emb-logging.h"
 #include "emb-time.h"
 #include "helpers-binary.h"
 #include "helpers-misc.h"
+#include "emb-stitch.h"
+#include <stdio.h>
+
 
 #define HOOP_126X110 0
 #define	HOOP_110X110 1
@@ -20,7 +21,12 @@ static int jefGetHoopSize(int width, int height)
     if(width < 140 && height < 200) { return HOOP_140X200; }
     return ((int) HOOP_110X110);
 }
-
+static char jefDecode(unsigned char inputByte)
+{
+    if(inputByte >= 0x80)
+        return (char) ((-~inputByte) - 1);
+    return ((char) inputByte);
+}
 static void jefSetHoopFromId(EmbPattern* pattern, int hoopCode)
 {
     if(!pattern) { embLog_error("format-jef.c jefSetHoopFromId(), pattern argument is null\n"); return; }
@@ -67,8 +73,13 @@ int readJef(EmbPattern* pattern, const char* fileName)
     struct hoop_padding bounds, rectFrom110x110, rectFrom50x50, rectFrom200x140, rect_from_custom;
     int stitchCount;
     char date[8], time[8];
-    char dx, dy;
+  
     EmbFile* file = 0;
+ 
+    unsigned char b0 = 0, b1 = 0;
+    char dx = 0, dy = 0;
+    int flags = 0;
+
 
     if(!pattern) { embLog_error("format-jef.c readJef(), pattern argument is null\n"); return 0; }
     if(!fileName) { embLog_error("format-jef.c readJef(), fileName argument is null\n"); return 0; }
@@ -119,38 +130,60 @@ int readJef(EmbPattern* pattern, const char* fileName)
     {
         embPattern_addThread(pattern, jefThreads[binaryReadInt32(file) % 79]);
     }
+
+
     embFile_seek(file, stitchOffset, SEEK_SET);
     stitchCount = 0;
     while(stitchCount < numberOfStitchs + 100)
     {
-        int flags = NORMAL;
-        unsigned char b0 = binaryReadByte(file);
-        unsigned char b1 = binaryReadByte(file);
-
+        flags = NORMAL;
+        b0 = (unsigned char)embFile_getc(file);
+        if(embFile_eof(file))
+            break;
+        b1 = (unsigned char)embFile_getc(file);
+        if(embFile_eof(file))
+            break;
         if(b0 == 0x80)
         {
-            if(b1 & 0x01)
+            if(b1 & 1)
             {
-                b0 = binaryReadByte(file);
-                b1 = binaryReadByte(file);
+                b0 = (unsigned char)embFile_getc(file);
+                if(embFile_eof(file))
+                    break;
+                b1 = (unsigned char)embFile_getc(file);
+                if(embFile_eof(file))
+                    break;
                 flags = STOP;
             }
-            else if(b1 == 0x02 || b1 == 0x04)
+            else if((b1 == 2) || (b1 == 4) || b1 == 6)
             {
-                b0 = binaryReadByte(file);
-                b1 = binaryReadByte(file);
+                flags = TRIM;
+                if(b1 == 2) flags = NORMAL;
+                b0 = (unsigned char)embFile_getc(file);
+                if(embFile_eof(file))
+                    break;
+                b1 = (unsigned char)embFile_getc(file);
+                if(embFile_eof(file))
+                    break;
+            }
+            else if(b1 == 0x80)
+            {
+                b0 = (unsigned char)embFile_getc(file);
+                if(embFile_eof(file))
+                    break;
+                b1 = (unsigned char)embFile_getc(file);
+                if(embFile_eof(file))
+                    break;
+                /* Seems to be b0=0x07 and b1=0x00
+                 * Maybe used as extension functions */
+                b0 = 0;
+                b1 = 0;
                 flags = TRIM;
             }
-            else if(b1 == 0x10)
-            {
-                embPattern_addStitchRel(pattern, 0, 0, END, 1);
-                break;
-            }
         }
-        dx = (char)b0;
-        dy = (char)b1;
+        dx = jefDecode(b0);
+        dy = jefDecode(b1);
         embPattern_addStitchRel(pattern, dx / 10.0, dy / 10.0, flags, 1);
-        stitchCount++;
     }
     embFile_close(file);
 
@@ -169,17 +202,17 @@ static void jefEncode(unsigned char* b, char dx, char dy, int flags)
         return;
     }
     /* TODO: How to encode JUMP stitches? JUMP must be handled. Also check this for the KSM format since it appears to be similar */
-    if(flags == TRIM)
-    {
-        b[0] = 128;
-        b[1] = 2;
-        b[2] = dx;
-        b[3] = dy;
-    }
-    else if(flags == STOP)
+    if(flags == STOP)
     {
         b[0] = 128;
         b[1] = 1;
+        b[2] = dx;
+        b[3] = dy;
+    }
+    else if(flags == TRIM)
+    {
+        b[0] = 128;
+        b[1] = 2;
         b[2] = dx;
         b[3] = dy;
     }
